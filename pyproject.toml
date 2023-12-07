@@ -1,0 +1,35 @@
+[project]
+name = "config_reg"
+version = "0.1.0"
+description = "personal config_reg project"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {file = "LICENSE.md"}
+keywords = ["config", "argparse"]
+authors = [
+  {name = "kelvin34501", email = "kelvin34501@foxmail.com" }
+]
+maintainers = [
+  {name = "kelvin34501", email = "kelvin34501@foxmail.com" }
+]
+classifiers = [
+  "Development Status :: 2 - Pre-Alpha",
+  "Intended Audience :: Developers",
+  "Topic :: Software Development",
+  "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3 :: Only",
+]
+
+dependencies = [
+    "PyYAML",
+]
+
+[project.urls]
+"Homepage" = "https://github.com/kelvin34501/config_reg"
+
+[build-system]
+requires = ["setuptools>=43.0.0", "wheel"]
+build-backend = "setuptools.build_meta"
