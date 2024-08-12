@@ -30,6 +30,7 @@ class ConfigEntryAttr:
     cmdpattern: Optional[ConfigEntryCommandlinePattern]
     default: Any
     callback: Optional[ConfigEntryCallback]
+    required: bool
 
 
 def prepare_default_config(meta_info_tree):
@@ -50,6 +51,8 @@ def check_config_integrity(meta_info_tree, config_tree, prefix=None):
         if isinstance(_meta_info_tree, ConfigEntryAttr):
             if _config_tree != ConfigEntryValueUnspecified:
                 return True, None
+            elif not _meta_info_tree.required:
+                return True, [_prefix]
             else:
                 return False, [_prefix]
 
@@ -89,6 +92,7 @@ class ConfigRegistry:
 
         # config: store parse res
         self.config = {}
+        self.lack_key_list = []
 
     def reg_seq_type(self, newtype: type):
         assert isinstance(newtype, type)
@@ -105,6 +109,7 @@ class ConfigRegistry:
         category: Union[type, Any] = Any,
         source: ConfigEntrySource = ConfigEntrySource.BUILTIN,
         desc: Optional[str] = None,
+        required: bool = False,
         default: Any = ConfigEntryValueUnspecified,
         cmdpattern: Optional[ConfigEntryCommandlinePattern] = None,
         callback: Optional[ConfigEntryCallback] = None,
@@ -149,6 +154,7 @@ class ConfigRegistry:
             cmdpattern=cmdpattern,
             default=default,
             callback=callback,
+            required=required,
         )
         _handle = self.meta_info_tree
         for offset, key_part in enumerate(key_list):
@@ -208,7 +214,19 @@ class ConfigRegistry:
             else:
                 parser.add_argument(f"--{entry_key}", help=entry_meta.desc)
 
-    def parse(self, parser: Optional[argparse.ArgumentParser] = None, arg_src=None, cfg_override=None):
+    def parse(self, parser: Optional[argparse.ArgumentParser] = None, arg_src=None, cfg_override=None, strict=True):
+        """
+        parse arg and config to self.config
+
+        :param parser: argparse.ArgumentParser
+            parser to parse args from
+        :param arg_src: list[str]
+            arg list to parse
+        :param cfg_override: str
+            config dict to override
+        :param strict: bool
+            if True, raise ValueError when required field has unspecified value in config
+        """
         # get a copy of default arg
         # required arg is leave to sentry
         _config = prepare_default_config(self.meta_info_tree)
@@ -299,9 +317,10 @@ class ConfigRegistry:
         # self.config bind to new config
         # return default arg
         is_good, lack_key_list = check_config_integrity(self.meta_info_tree, _config)
-        if not is_good:
+        if strict and (not is_good):
             raise ValueError(f"unspecified value in config! key: {lack_key_list}")
         self.config = _config
+        self.lack_key_list = lack_key_list
 
     def select(self, prefix: Optional[str] = None):
         if prefix is None:
