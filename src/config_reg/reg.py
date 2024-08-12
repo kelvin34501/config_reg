@@ -333,6 +333,9 @@ class ConfigRegistry:
             raise KeyError(f"prefix not found! got {prefix}")
         return deepcopy(index_value)
 
+    def register_proxy(self, **kwarg):
+        return RegisterProxy(self, **kwarg)
+
 
 def set_value(config, key, value):
     key_list = key.split(".")
@@ -353,3 +356,13 @@ def index_key(tree, key):
             return False, None
         handle = handle[keypart]
     return True, handle
+
+
+class RegisterProxy:
+    def __init__(self, config_reg: ConfigRegistry, **kwarg) -> None:
+        self.config_reg = config_reg
+        self.kwarg = kwarg
+
+    def register(self, *args, **kwargs):
+        self.config_reg.register(*args, **self.kwarg, **kwargs)
+        return self
