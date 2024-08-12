@@ -88,7 +88,7 @@ class ConfigRegistry:
         self.category_proclist_cache: dict[Union[type, Any], Any] = {}
 
         # bind: store
-        self.bind_config_list: list[str] = []
+        self.bind_config_filepath_list: list[str] = []
 
         # config: store parse res
         self.config = {}
@@ -172,11 +172,13 @@ class ConfigRegistry:
                     _handle = _handle[key_part]
         self.meta_info[internal_key] = attr_tuple
 
-    def bind_default_config(self, cfg: Union[str, Sequence[str]]):
-        if isinstance(cfg, Sequence):
-            self.bind_config_list.extend(cfg)
+        return self
+
+    def bind_default_config_filepath(self, cfg_filepath: Union[str, Sequence[str]]):
+        if isinstance(cfg_filepath, str):
+            self.bind_config_filepath_list.append(cfg_filepath)
         else:
-            self.bind_config_list.append(cfg)
+            self.bind_config_filepath_list.extend(cfg_filepath)
 
     def hook(self, parser: Optional[argparse.ArgumentParser] = None):
         if parser is None:
@@ -239,7 +241,7 @@ class ConfigRegistry:
 
             cfg_list = getattr(parse_res, "cfg", None)
             if cfg_list is not None:
-                self.bind_config_list.extend(cfg_list)
+                self.bind_config_filepath_list.extend(cfg_list)
 
         # process cfg
         entry_config = list(
@@ -247,7 +249,7 @@ class ConfigRegistry:
             for entry_key, entry_meta in self.meta_info.items()
             if entry_meta.source in (ConfigEntrySource.CONFIG_ONLY, ConfigEntrySource.COMMANDLINE_OVER_CONFIG)
         )
-        for config_filepath in self.bind_config_list:
+        for config_filepath in self.bind_config_filepath_list:
             config_ext = os.path.splitext(config_filepath)[1]
             if config_ext in [".yml", ".yaml"]:
                 config_blob = load_yaml(config_filepath)
