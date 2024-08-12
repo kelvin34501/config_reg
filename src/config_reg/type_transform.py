@@ -1,10 +1,5 @@
-from __future__ import annotations
-import sys
 import typing
 
 
-def category_transform(cata):
-    if hasattr(cata, "__origin__"):
-        return cata.__origin__
-    else:
-        return cata
+def is_type(t):
+    return isinstance(t, type) or typing.get_origin(t) is not None

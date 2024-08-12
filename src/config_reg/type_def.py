@@ -59,7 +59,7 @@ def analyze_type(in_type, seq_type_list, map_type_list):
 
         origin = typing.get_origin(_in_type)
         if origin is None:
-            return {"proc": _in_type, "cast": None, "next": []}
+            return {"proc": origin, "cast": None, "next": []}
 
         if origin in _seq_type_list:
             args = typing.get_args(_in_type)

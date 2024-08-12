@@ -13,7 +13,7 @@ from .type_def import (
 from .type_def import supported_by_commandline, proclist_pattern_paired
 from .type_def import handle_cmd_seq, handle_cmd_map
 from .type_def import hook_cmd_bool, handle_cmd_bool
-from .type_transform import category_transform
+from .type_transform import is_type
 
 from .callback import ConfigEntryCallback, resolve_callback_dependency
 
@@ -121,8 +121,7 @@ class ConfigRegistry:
             raise KeyError("collide with internal key!")
 
         # check cata
-        category = category_transform(category)
-        if category != Any and not isinstance(category, type):
+        if category != Any and not is_type(category):
             raise TypeError(f"error in category, got {category}")
         if category not in self.category_proclist_cache:
             proclist = analyze_type(category, self.supported_seq_type, self.supported_map_type)
