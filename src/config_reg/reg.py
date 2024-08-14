@@ -1,7 +1,9 @@
+from __future__ import annotations
+
 import os
 import argparse
 from typing import Optional, Union, Any
-from typing import Sequence
+from typing import Sequence, Mapping
 from dataclasses import dataclass
 
 from .type_def import ConfigEntrySource, ConfigEntryValueUnspecified, analyze_type, cast_to_res
@@ -323,14 +325,27 @@ class ConfigRegistry:
         self.config = _config
         self.lack_key_list = lack_key_list
 
-    def select(self, prefix: Optional[str] = None):
+    def select(self, prefix: Optional[str] = None, strip=False):
+        cfg = deepcopy(self.config)
+        if strip:
+            cfg = self.strip(cfg)
         if prefix is None:
-            return deepcopy(self.config)
+            return cfg
 
-        index_status, index_value = index_key(self.config, prefix)
+        index_status, index_value = index_key(cfg, prefix)
         if not index_status:
             raise KeyError(f"prefix not found! got {prefix}")
-        return deepcopy(index_value)
+        return index_value
+
+    def strip(self, opt: Mapping):
+        res = prepare_default_config(self.meta_info_tree)
+        for entry_key in self.meta_info:
+            index_status, index_value = index_key(opt, entry_key)
+            if index_status and index_value != ConfigEntryValueUnspecified:
+                set_value(res, entry_key, index_value)
+            else:
+                del_value(res, entry_key)
+        return res
 
     def register_proxy(self, **kwarg):
         return RegisterProxy(self, **kwarg)
@@ -357,11 +372,31 @@ def index_key(tree, key):
     return True, handle
 
 
+def del_value(config, key):
+    key_list = key.split(".")
+    handle = config
+    traceback = []
+    for keypart in key_list[:-1]:
+        traceback.append(handle)
+        handle = handle[keypart]
+    if key_list[-1] in handle:
+        del handle[key_list[-1]]
+    
+    # cleanup empty
+    if len(key_list) > 1:
+        for off, keypart in zip(range(len(key_list) - 2, -1, -1), key_list[-2::-1]):
+            handle_curr = traceback[off]
+            if len(handle_curr[keypart]) == 0:
+                del handle_curr[keypart]
+
+
 class RegisterProxy:
     def __init__(self, config_reg: ConfigRegistry, **kwarg) -> None:
         self.config_reg = config_reg
         self.kwarg = kwarg
 
     def register(self, *args, **kwargs):
-        self.config_reg.register(*args, **self.kwarg, **kwargs)
+        _kv = self.kwarg.copy()
+        _kv.update(kwargs)
+        self.config_reg.register(*args, **_kv)
         return self
