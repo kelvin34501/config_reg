@@ -8,6 +8,8 @@ from .type_def import (
 from .callback import ConfigEntryCallback
 from .reg import ConfigRegistry
 
+from .convert import instantiate
+
 __all__ = [
     "ConfigRegistry",
     "ConfigEntrySource",
@@ -17,4 +19,5 @@ __all__ = [
     "ConfigEntryCommandlineBoolPattern",
     "ConfigEntryValueUnspecified",
     "ConfigEntryCallback",
+    "instantiate",
 ]
