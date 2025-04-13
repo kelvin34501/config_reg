@@ -89,7 +89,41 @@ class AbspathCallback(ConfigEntryCallback):
         else:
             return self.to_abs(curr_value)
 
-       
-
 
 abspath_callback = AbspathCallback()
+
+
+class InterpolationCallback(ConfigEntryCallback):
+    always: bool = False
+
+    def __init__(self, template: str, ensure_str=True) -> None:
+        super().__init__()
+
+        from .util import subst_util
+
+        self.template = template
+        self.ensure_str = ensure_str
+
+        # extract dependency
+        key_list, span_list = subst_util.extract_special_part(self.template)
+        self.key_list = key_list
+        self.span_list = span_list
+        self.dependency = self.key_list.copy()
+
+    def __call__(self, curr_key: str, curr_value: typing.Any, prog: str, dep: typing.Mapping) -> typing.Any:
+        from .util import subst_util
+        from .index import index_key
+        assert curr_key not in self.key_list, "cyclic dependency"
+
+        replacement_list = []
+        for k in self.key_list:
+            assert k in dep, f"key {k} not found in dependency, got dep: {dep}"
+            v = dep[k]
+            if self.ensure_str:
+                assert isinstance(v, str), f"value {v} is not str"
+            replacement_list.append(str(v))
+
+        print(replacement_list)
+
+        new_value = subst_util.replace_from_span(self.template, self.span_list, replacement_list)
+        return new_value
