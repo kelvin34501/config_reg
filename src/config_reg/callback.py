@@ -123,7 +123,5 @@ class InterpolationCallback(ConfigEntryCallback):
                 assert isinstance(v, str), f"value {v} is not str"
             replacement_list.append(str(v))
 
-        print(replacement_list)
-
         new_value = subst_util.replace_from_span(self.template, self.span_list, replacement_list)
         return new_value
