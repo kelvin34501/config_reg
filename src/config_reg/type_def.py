@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import enum
 from enum import auto
 import re
@@ -8,7 +9,6 @@ import typing
 from typing import Any
 
 if typing.TYPE_CHECKING:
-    import argparse
     from .reg import ConfigEntryAttr
 
 
@@ -53,6 +53,7 @@ class ConfigEntryValueUnspecified:
 
 
 def analyze_type(in_type, seq_type_list, map_type_list):
+
     def _analyze_type(_in_type, _seq_type_list, _map_type_list):
         if _in_type == Any:
             return {"proc": None, "cast": None, "next": []}
@@ -114,6 +115,7 @@ def proclist_pattern_paired(proclist, cmdpattern, supported_seq, supported_map):
 
 
 def cast_to_res(blob, proclist):
+
     def _cast_to_res(_blob, _proclist):
         _res = _blob
         if _proclist["cast"] == "seq":
@@ -217,38 +219,39 @@ def handle_cmd_map(in_str, sep_type):
     return res
 
 
-def hook_cmd_bool(
-    parser: argparse.ArgumentParser, key: str, pattern: ConfigEntryCommandlineBoolPattern, meta: ConfigEntryAttr
-):
+def hook_cmd_bool(parser: argparse.ArgumentParser, key: str, pattern: ConfigEntryCommandlineBoolPattern,
+                  meta: ConfigEntryAttr):
     if pattern == ConfigEntryCommandlineBoolPattern.SET_TRUE:
-        parser.add_argument(f"--{key}", action="store_true", help=meta.desc)
+        parser.add_argument(f"--{key}", action="store_true", default=argparse.SUPPRESS, help=meta.desc)
     elif pattern == ConfigEntryCommandlineBoolPattern.SET_FALSE:
-        parser.add_argument(f"--{key}", action="store_false", help=meta.desc)
+        parser.add_argument(f"--{key}", action="store_false", default=argparse.SUPPRESS, help=meta.desc)
     elif pattern == ConfigEntryCommandlineBoolPattern.ON_OFF:
-        parser.add_argument(f"--{key}", action="store_true", help=meta.desc)
+        parser.add_argument(f"--{key}", action="store_true", default=argparse.SUPPRESS, help=meta.desc)
         opt_str = list(parser._option_string_actions.keys())
         if f"--{key}__off" in opt_str:
             raise KeyError(f"parser already have string action `--{key}__off`!")
         off_desc = meta.desc + " (off)" if meta.desc is not None else None
-        parser.add_argument(f"--{key}__off", action="store_true", help=off_desc)
+        parser.add_argument(f"--{key}__off", action="store_true", default=argparse.SUPPRESS, help=off_desc)
     else:
         raise TypeError(f"unknown cmdline bool pattern! got {pattern}")
 
 
 def handle_cmd_bool(parse_res: argparse.Namespace, key: str, pattern: ConfigEntryCommandlineBoolPattern):
     if pattern == ConfigEntryCommandlineBoolPattern.SET_TRUE:
-        if getattr(parse_res, key):
+        # Use hasattr to check if arg exists (due to SUPPRESS)
+        if hasattr(parse_res, key) and getattr(parse_res, key):
             res = True
         else:
             res = ConfigEntryValueUnspecified
     elif pattern == ConfigEntryCommandlineBoolPattern.SET_FALSE:
-        if not getattr(parse_res, key):
+        # For SET_FALSE, only set when arg exists and is False
+        if hasattr(parse_res, key) and not getattr(parse_res, key):
             res = False
         else:
             res = ConfigEntryValueUnspecified
     elif pattern == ConfigEntryCommandlineBoolPattern.ON_OFF:
-        on_flag = getattr(parse_res, key)
-        off_flag = getattr(parse_res, f"{key}__off")
+        on_flag = getattr(parse_res, key, False)
+        off_flag = getattr(parse_res, f"{key}__off", False)
         if not on_flag and not off_flag:
             res = ConfigEntryValueUnspecified
         elif on_flag and not off_flag:

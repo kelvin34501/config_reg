@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import logging
 import os
+import sys
 import argparse
 from typing import Optional, Union, Any
 from typing import Sequence, Mapping
@@ -25,6 +27,115 @@ from .if_yaml import load_yaml
 
 from copy import deepcopy
 
+logger = logging.getLogger(__name__)
+
+
+def split_argv_by_cfg(argv: list[str]) -> list[tuple[str, any]]:
+    """
+    Split argv by -c/--cfg markers into segments.
+
+    The '--' marker stops config file parsing; all arguments after '--' are
+    treated as regular arguments and '-c/--cfg' will not be interpreted as
+    config file markers.
+
+    Returns: [(segment_type, content), ...]
+        segment_type: 'args' | 'cfg'
+        content:
+            - 'args': list[str] - argument list
+            - 'cfg': str - config file path
+
+    Example:
+        Input: ['--a', '1', '-c', 'f1.yaml', '--b', '2', '--cfg=f2.yaml', '--c', '3']
+        Output: [
+            ('args', ['--a', '1']),
+            ('cfg', 'f1.yaml'),
+            ('args', ['--b', '2']),
+            ('cfg', 'f2.yaml'),
+            ('args', ['--c', '3'])
+        ]
+
+        Input: ['--a', '1', '--', '-c', 'not_a_config']
+        Output: [
+            ('args', ['--a', '1', '--', '-c', 'not_a_config'])
+        ]
+    """
+    segments = []
+    current_args = []
+    i = 0
+    stop_cfg_parsing = False  # Set to True after encountering '--'
+
+    while i < len(argv):
+        arg = argv[i]
+
+        # Check for '--' terminator
+        if arg == '--':
+            current_args.append(arg)
+            stop_cfg_parsing = True
+            i += 1
+            continue
+
+        # After '--', treat everything as regular arguments
+        if stop_cfg_parsing:
+            # Warn if -c/--cfg appears after '--'
+            if arg == '-c' or arg == '--cfg' or arg.startswith('--cfg='):
+                logger.warning(f"'{arg}' after '--' will be treated as regular argument, "
+                               "not as config file marker")
+            current_args.append(arg)
+            i += 1
+            continue
+
+        # Case 1: -c <file> or --cfg <file> (two tokens)
+        if arg == '-c' or arg == '--cfg':
+            # Save current accumulated args segment
+            if current_args:
+                segments.append(('args', current_args))
+                current_args = []
+
+            # Get config file path
+            if i + 1 < len(argv):
+                cfg_file = argv[i + 1]
+
+                # Warn if config file path looks like an option (starts with -)
+                # This may indicate the previous argument expected a value
+                if cfg_file.startswith('-'):
+                    logger.warning(f"Config file path '{cfg_file}' looks like an option. "
+                                   f"Did you mean to pass '{cfg_file}' as a value to the previous argument? "
+                                   "Use '--' to stop config file parsing if needed.")
+
+                segments.append(('cfg', cfg_file))
+                i += 2  # Skip -c and file path
+            else:
+                raise ValueError(f"Missing config file path after {arg}")
+
+        # Case 2: --cfg=<file> (single token)
+        elif arg.startswith('--cfg='):
+            if current_args:
+                segments.append(('args', current_args))
+                current_args = []
+
+            cfg_file = arg[6:]  # Remove '--cfg='
+            if not cfg_file:
+                raise ValueError("Empty config file path in --cfg=")
+
+            # Warn if config file path looks like an option
+            if cfg_file.startswith('-'):
+                logger.warning(f"Config file path '{cfg_file}' looks like an option. "
+                               "Use '--' to stop config file parsing if needed.")
+
+            segments.append(('cfg', cfg_file))
+            i += 1
+
+        # Case 3: regular argument
+        else:
+            current_args.append(arg)
+            i += 1
+
+    # Add final args segment
+    if current_args:
+        segments.append(('args', current_args))
+
+    return segments
+
 
 @dataclass
 class ConfigEntryAttr:
@@ -38,6 +149,7 @@ class ConfigEntryAttr:
 
 
 def prepare_default_config(meta_info_tree):
+
     def _prepare_default_config(_meta_info_tree):
         if isinstance(_meta_info_tree, ConfigEntryAttr):
             return deepcopy(_meta_info_tree.default)
@@ -51,6 +163,7 @@ def prepare_default_config(meta_info_tree):
 
 
 def check_config_integrity(meta_info_tree, config_tree, prefix=None):
+
     def _check_config_integrity(_meta_info_tree, _config_tree, _prefix=None):
         if isinstance(_meta_info_tree, ConfigEntryAttr):
             if _config_tree != ConfigEntryValueUnspecified:
@@ -77,6 +190,7 @@ def check_config_integrity(meta_info_tree, config_tree, prefix=None):
 
 
 class ConfigRegistry:
+
     def __init__(self, prog: str = "prog"):
         self.prog = prog
 
@@ -137,9 +251,8 @@ class ConfigRegistry:
         if source in [ConfigEntrySource.COMMANDLINE_ONLY, ConfigEntrySource.COMMANDLINE_OVER_CONFIG]:
             if not supported_by_commandline(self.category_proclist_cache[category]):
                 raise TypeError(f"category not supported! got category {category}")
-            if not proclist_pattern_paired(
-                self.category_proclist_cache[category], cmdpattern, self.supported_seq_type, self.supported_map_type
-            ):
+            if not proclist_pattern_paired(self.category_proclist_cache[category], cmdpattern, self.supported_seq_type,
+                                           self.supported_map_type):
                 raise TypeError(f"proclist & cmdpattern not paired! got category {category} and pattern {cmdpattern}")
 
         # key_list
@@ -191,37 +304,126 @@ class ConfigRegistry:
         self.hook_arg(parser)
 
     def hook_config(self, parser: Optional[argparse.ArgumentParser] = None):
+        # In segmented parsing, -c/--cfg is handled by split_argv_by_cfg() beforehand.
+        # We still register a dummy option for:
+        # 1. Displaying usage in --help
+        # 2. Preventing users from registering conflicting -c/--cfg arguments
         if parser is None:
             return
 
-        # check if parser has "-c,--cfg" field
+        # Check if -c/--cfg already exists
         opt_str = list(parser._option_string_actions.keys())
         if "-c" in opt_str or "--cfg" in opt_str:
             raise KeyError("parser already have string action `-c` or `--cfg`!")
 
-        # append config args
-        parser.add_argument("-c", "--cfg", action="append", help=f"{self.__class__.__name__} config file")
+        # Register dummy option (actually handled by split_argv_by_cfg, never parsed by argparse)
+        parser.add_argument("-c",
+                            "--cfg",
+                            action="append",
+                            default=argparse.SUPPRESS,
+                            metavar="FILE",
+                            help=f"{self.__class__.__name__} config file (can be interleaved with options in any order)")
 
     def hook_arg(self, parser: Optional[argparse.ArgumentParser] = None):
         if parser is None:
             return
 
         # hook arg
-        entry_cmdline = list(
-            entry_key
-            for entry_key, entry_meta in self.meta_info.items()
-            if entry_meta.source in (ConfigEntrySource.COMMANDLINE_ONLY, ConfigEntrySource.COMMANDLINE_OVER_CONFIG)
-        )
+        entry_cmdline = list(entry_key for entry_key, entry_meta in self.meta_info.items()
+                             if entry_meta.source in (ConfigEntrySource.COMMANDLINE_ONLY,
+                                                      ConfigEntrySource.COMMANDLINE_OVER_CONFIG))
         for entry_key in entry_cmdline:
             entry_meta = self.meta_info[entry_key]
             if entry_meta.category == bool:
                 hook_cmd_bool(parser, entry_key, entry_meta.cmdpattern, entry_meta)
             else:
-                parser.add_argument(f"--{entry_key}", help=entry_meta.desc)
+                # Add default=argparse.SUPPRESS so unprovided args don't appear in namespace
+                parser.add_argument(f"--{entry_key}", default=argparse.SUPPRESS, help=entry_meta.desc)
+
+    def _apply_config_file(self, config_tree, config_filepath, entry_config):
+        """Load and apply a single config file."""
+        config_ext = os.path.splitext(config_filepath)[1]
+        if config_ext in [".yml", ".yaml"]:
+            config_blob = load_yaml(config_filepath)
+        else:
+            raise RuntimeError(f"unsupported config type! got {repr(config_ext)}")
+
+        for entry_key in entry_config:
+            entry_meta = self.meta_info[entry_key]
+            index_status, raw_res = index_key(config_blob, entry_key)
+            if index_status:
+                cast_res = cast_to_res(raw_res, self.category_proclist_cache[entry_meta.category])
+                set_value(config_tree, entry_key, cast_res)
+
+    def _apply_cmdline_args(self, config_tree, parser, argv_segment):
+        """Parse and apply a single command-line argument segment."""
+        # Parse this segment
+        namespace = parser.parse_args(argv_segment)
+        parsed_dict = vars(namespace)  # Convert to dict
+
+        # Only process explicitly provided args (due to SUPPRESS)
+        entry_cmdline = list(entry_key for entry_key, entry_meta in self.meta_info.items()
+                             if entry_meta.source in (ConfigEntrySource.COMMANDLINE_ONLY,
+                                                      ConfigEntrySource.COMMANDLINE_OVER_CONFIG))
+
+        for entry_key in entry_cmdline:
+            entry_meta = self.meta_info[entry_key]
+
+            # Handle boolean type
+            if entry_meta.category == bool:
+                raw_res = handle_cmd_bool(namespace, entry_key, entry_meta.cmdpattern)
+                if raw_res == ConfigEntryValueUnspecified:
+                    continue
+            else:
+                # Check if this arg was provided in this segment
+                if entry_key not in parsed_dict:
+                    continue
+
+                raw_res = parsed_dict[entry_key]
+                # Handle seq/map type cmdpattern
+                if isinstance(entry_meta.cmdpattern, ConfigEntryCommandlineSeqPattern):
+                    raw_res = handle_cmd_seq(raw_res, entry_meta.cmdpattern)
+                elif isinstance(entry_meta.cmdpattern, ConfigEntryCommandlineMapPattern):
+                    raw_res = handle_cmd_map(raw_res, entry_meta.cmdpattern)
+
+            # Type cast and set value
+            cast_res = cast_to_res(raw_res, self.category_proclist_cache[entry_meta.category])
+            set_value(config_tree, entry_key, cast_res)
+
+    def _process_callbacks(self, config_tree):
+        """Process all callbacks."""
+        entry_callback_map = {}
+        for entry_key, entry_meta in self.meta_info.items():
+            if entry_meta.callback is not None and (entry_meta.callback.always or index_key(config_tree, entry_key)[1]
+                                                    == ConfigEntryValueUnspecified):
+                entry_callback_map[entry_key] = entry_meta.callback
+
+        callback_run_order = resolve_callback_dependency(entry_callback_map)
+        if callback_run_order is None:
+            raise RuntimeError(f"circular dependency when solving callback order!")
+
+        # process callback
+        for entry_key in callback_run_order:
+            entry_callback: ConfigEntryCallback = self.meta_info[entry_key].callback
+            entry_value = index_key(config_tree, entry_key)[1]
+            dep = {}
+            for dep_key in entry_callback.dependency:
+                dep[dep_key] = index_key(config_tree, dep_key)[1]
+            callback_value = entry_callback(entry_key, entry_value, prog=self.prog, dep=dep)
+            if callback_value != ConfigEntryValueUnspecified:
+                set_value(config_tree, entry_key, callback_value)
+
+    def _finalize_config(self, config_tree, strict):
+        """Validate integrity and save config."""
+        is_good, lack_key_list = check_config_integrity(self.meta_info_tree, config_tree)
+        if strict and (not is_good):
+            raise ValueError(f"unspecified value in config! key: {lack_key_list}")
+        self.config = config_tree
+        self.lack_key_list = lack_key_list
 
     def parse(self, parser: Optional[argparse.ArgumentParser] = None, arg_src=None, cfg_override=None, strict=True):
         """
-        parse arg and config to self.config
+        Parse config files and command-line arguments in left-to-right order.
 
         :param parser: argparse.ArgumentParser
             parser to parse args from
@@ -232,100 +434,48 @@ class ConfigRegistry:
         :param strict: bool
             if True, raise ValueError when required field has unspecified value in config
         """
-        # get a copy of default arg
-        # required arg is leave to sentry
+        # 1. Prepare default config
         _config = prepare_default_config(self.meta_info_tree)
 
-        if parser is None:
-            parse_res = None
-        else:
-            # parse arg for cfg
-            parse_res = parser.parse_args(arg_src)
+        # 2. Get list of entries that can be read from config files
+        entry_config = list(entry_key for entry_key, entry_meta in self.meta_info.items()
+                            if entry_meta.source in (ConfigEntrySource.CONFIG_ONLY,
+                                                     ConfigEntrySource.COMMANDLINE_OVER_CONFIG))
 
-            cfg_list = getattr(parse_res, "cfg", None)
-            if cfg_list is not None:
-                self.bind_config_filepath_list.extend(cfg_list)
-
-        # process cfg
-        entry_config = list(
-            entry_key
-            for entry_key, entry_meta in self.meta_info.items()
-            if entry_meta.source in (ConfigEntrySource.CONFIG_ONLY, ConfigEntrySource.COMMANDLINE_OVER_CONFIG)
-        )
+        # 3. Process pre-bound config files (bind_default_config_filepath)
         for config_filepath in self.bind_config_filepath_list:
-            config_ext = os.path.splitext(config_filepath)[1]
-            if config_ext in [".yml", ".yaml"]:
-                config_blob = load_yaml(config_filepath)
-            else:
-                raise RuntimeError(f"unsupported config type! got {repr(config_ext)}")
+            self._apply_config_file(_config, config_filepath, entry_config)
 
-            for entry_key in entry_config:
-                entry_meta = self.meta_info[entry_key]
-                index_status, raw_res = index_key(config_blob, entry_key)
-                if index_status:
-                    cast_res = cast_to_res(raw_res, self.category_proclist_cache[entry_meta.category])
-                    set_value(_config, entry_key, cast_res)
+        # 4. If no parser, skip command-line parsing
+        if parser is None:
+            self._process_callbacks(_config)
+            self._finalize_config(_config, strict)
+            return
 
-        # process command line
-        if parse_res is None:
-            pass
-        else:
-            # override with arg
-            entry_cmdline = list(
-                entry_key
-                for entry_key, entry_meta in self.meta_info.items()
-                if entry_meta.source in (ConfigEntrySource.COMMANDLINE_ONLY, ConfigEntrySource.COMMANDLINE_OVER_CONFIG)
-            )
-            for entry_key in entry_cmdline:
-                entry_meta = self.meta_info[entry_key]
-                if entry_meta.category == bool:
-                    raw_res = handle_cmd_bool(parse_res, entry_key, entry_meta.cmdpattern)
-                    if raw_res == ConfigEntryValueUnspecified:
-                        continue
-                else:
-                    raw_res = getattr(parse_res, entry_key)
-                    if raw_res is None:
-                        continue
-                    # handle raw_res
-                    if isinstance(entry_meta.cmdpattern, ConfigEntryCommandlineSeqPattern):
-                        raw_res = handle_cmd_seq(raw_res, entry_meta.cmdpattern)
-                    elif isinstance(entry_meta.cmdpattern, ConfigEntryCommandlineMapPattern):
-                        raw_res = handle_cmd_map(raw_res, entry_meta.cmdpattern)
-                cast_res = cast_to_res(raw_res, self.category_proclist_cache[entry_meta.category])
-                set_value(_config, entry_key, cast_res)
+        # 5. Segment-based argv processing
+        if arg_src is None:
+            arg_src = sys.argv[1:]
 
-        # TODO: process override
+        segments = split_argv_by_cfg(arg_src)
+
+        # 6. Process each segment in order
+        for seg_type, seg_content in segments:
+            if seg_type == 'cfg':
+                # Load and apply config file
+                self._apply_config_file(_config, seg_content, entry_config)
+
+            elif seg_type == 'args':
+                # Parse and apply command-line arguments
+                self._apply_cmdline_args(_config, parser, seg_content)
+
+        # 7. TODO: process override
         pass
 
-        # * experimental: resolve callback dependency
-        entry_callback_map = {}
-        for entry_key, entry_meta in self.meta_info.items():
-            if entry_meta.callback is not None and (
-                entry_meta.callback.always or index_key(_config, entry_key)[1] == ConfigEntryValueUnspecified
-            ):
-                entry_callback_map[entry_key] = entry_meta.callback
-        callback_run_order = resolve_callback_dependency(entry_callback_map)
-        if callback_run_order is None:
-            raise RuntimeError(f"circular dependency when solving callback order!")
+        # 8. Process callbacks
+        self._process_callbacks(_config)
 
-        # process callback
-        for entry_key in callback_run_order:
-            entry_callback: ConfigEntryCallback = self.meta_info[entry_key].callback
-            entry_value = index_key(_config, entry_key)[1]
-            dep = {}
-            for dep_key in entry_callback.dependency:
-                dep[dep_key] = index_key(_config, dep_key)[1]
-            callback_value = entry_callback(entry_key, entry_value, prog=self.prog, dep=dep)
-            if callback_value != ConfigEntryValueUnspecified:
-                set_value(_config, entry_key, callback_value)
-
-        # self.config bind to new config
-        # return default arg
-        is_good, lack_key_list = check_config_integrity(self.meta_info_tree, _config)
-        if strict and (not is_good):
-            raise ValueError(f"unspecified value in config! key: {lack_key_list}")
-        self.config = _config
-        self.lack_key_list = lack_key_list
+        # 9. Validate and save config
+        self._finalize_config(_config, strict)
 
     def select(self, prefix: Optional[str] = None, strip=False):
         cfg = deepcopy(self.config)
@@ -354,6 +504,7 @@ class ConfigRegistry:
 
 
 class RegisterProxy:
+
     def __init__(self, config_reg: ConfigRegistry, **kwarg) -> None:
         self.config_reg = config_reg
         self.kwarg = kwarg

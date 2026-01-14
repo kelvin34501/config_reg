@@ -1,6 +1,6 @@
 [project]
 name = "config_reg"
-version = "0.1.3"
+version = "0.1.4"
 description = "personal config_reg project"
 readme = "README.md"
 requires-python = ">=3.8"
