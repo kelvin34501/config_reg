@@ -1,5 +1,6 @@
 import copy
 import functools
+from dataclasses import is_dataclass, fields
 from enum import Enum
 from textwrap import dedent
 from typing import Any, Callable, Dict, List, Sequence, Tuple, Union
@@ -66,25 +67,14 @@ def _convert_target_to_string(t: Any) -> Any:
         return str(t)
 
 
-def _prepare_input_dict_or_list(d: Union[Dict[Any, Any], List[Any]]) -> Any:
-    res: Any
-    if isinstance(d, dict):
-        res = {}
-        for k, v in d.items():
-            if k == "_target_":
-                v = _convert_target_to_string(d["_target_"])
-            elif isinstance(v, (dict, list)):
-                v = _prepare_input_dict_or_list(v)
-            res[k] = v
-    elif isinstance(d, list):
-        res = []
-        for v in d:
-            if isinstance(v, (list, dict)):
-                v = _prepare_input_dict_or_list(v)
-            res.append(v)
-    else:
-        assert False
-    return res
+def _is_dataclass_instance(obj: Any) -> bool:
+    """Check if obj is a dataclass instance (not a dataclass class)."""
+    return is_dataclass(obj) and not isinstance(obj, type)
+
+
+def _dataclass_to_dict_shallow(obj: Any) -> Dict[str, Any]:
+    """Shallow convert a dataclass instance to dict. Child values are kept as-is."""
+    return {f.name: getattr(obj, f.name) for f in fields(obj)}
 
 
 def _resolve_target(target: Union[str, type, Callable[..., Any]], full_key: str) -> Union[type, Callable[..., Any]]:
@@ -153,6 +143,10 @@ def instantiate_node(config: Any, *args: Any, recursive: bool = True, partial: b
     if config is None:
         return None
 
+    # Shallow convert dataclass to dict (lazy: children remain as-is)
+    if _is_dataclass_instance(config):
+        config = _dataclass_to_dict_shallow(config)
+
     if not isinstance(config, (list, dict)):
         return config
 
@@ -188,6 +182,10 @@ def instantiate_node(config: Any, *args: Any, recursive: bool = True, partial: b
                     value = config[key]
                     if node_recursive:
                         value = instantiate_node(value, recursive=node_recursive)
+                    else:
+                        # Even with recursive=False, convert dataclass to dict (shallow)
+                        if _is_dataclass_instance(value):
+                            value = _dataclass_to_dict_shallow(value)
                     kwargs[key] = value
             return _call_target(_target_, node_partial, args, kwargs, full_key)
 
@@ -198,11 +196,24 @@ def instantiate_node(config: Any, *args: Any, recursive: bool = True, partial: b
         raise InstantiationException(f"Unexpected config type: {type(config).__name__}")
 
 
-def instantiate(config: Union[Dict[Any, Any], List[Any]], *args: Any, full_key: str = "", **kwargs: Any) -> Any:
+def _get_target_from_config(config: Any) -> Any:
+    """Get _target_ from config (dict, dataclass, or via attribute)."""
+    if isinstance(config, dict):
+        return config.get("_target_")
+    elif _is_dataclass_instance(config):
+        return getattr(config, "_target_", None)
+    elif hasattr(config, "_target_"):
+        return getattr(config, "_target_", None)
+    return None
+
+
+def instantiate(config: Any, *args: Any, full_key: str = "", **kwargs: Any) -> Any:
     if config is None:
         return None
 
-    if "_target_" not in config or config["_target_"] is None or config["_target_"] == "":
+    # Check _target_ exists (support dict and dataclass)
+    target = _get_target_from_config(config)
+    if target is None or target == "":
         raise InstantiationException(
             dedent("""\
             Config has missing value for key `_target_`, cannot instantiate.
@@ -210,9 +221,9 @@ def instantiate(config: Union[Dict[Any, Any], List[Any]], *args: Any, full_key: 
             Check that the `_target_` key in your dataclass is properly annotated and overridden.
         """))
 
-    if isinstance(config, (dict, list)):
-        config = _prepare_input_dict_or_list(config)
-    kwargs = _prepare_input_dict_or_list(kwargs)
+    # Shallow convert dataclass to dict at top level
+    if _is_dataclass_instance(config):
+        config = _dataclass_to_dict_shallow(config)
 
     if isinstance(config, dict):
         config_copy = copy.deepcopy(config)
