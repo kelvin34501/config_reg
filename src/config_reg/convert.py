@@ -149,10 +149,10 @@ def _locate(path: str) -> Any:
     return obj
 
 
-def instantiate_node(config: Any, *args: Any, recursive: bool = True, partial: bool = False, full_key: str="") -> Any:
+def instantiate_node(config: Any, *args: Any, recursive: bool = True, partial: bool = False, full_key: str = "") -> Any:
     if config is None:
         return None
-    
+
     if not isinstance(config, (list, dict)):
         return config
 
@@ -163,8 +163,8 @@ def instantiate_node(config: Any, *args: Any, recursive: bool = True, partial: b
         raise TypeError(msg)
 
     if not isinstance(partial, bool):
-        msg = f"Instantiation: _partial_ flag must be a bool, got {type( partial )}"
-        if node and full_key:
+        msg = f"Instantiation: _partial_ flag must be a bool, got {type(partial)}"
+        if full_key:
             msg += f"\nfull_key: {full_key}"
         raise TypeError(msg)
 
@@ -177,14 +177,19 @@ def instantiate_node(config: Any, *args: Any, recursive: bool = True, partial: b
         exclude_keys = set({_Keys.TARGET, _Keys.RECURSIVE, _Keys.PARTIAL})
         if _is_target(config):
             _target_ = _resolve_target(config.get(_Keys.TARGET, ""), full_key)
+
+            # Node-level _recursive_ and _partial_ override
+            node_recursive = config.get(_Keys.RECURSIVE, recursive)
+            node_partial = config.get(_Keys.PARTIAL, partial)
+
             kwargs = {}
             for key in config.keys():
                 if key not in exclude_keys:
                     value = config[key]
-                    if recursive:
-                        value = instantiate_node(value, recursive=recursive)
+                    if node_recursive:
+                        value = instantiate_node(value, recursive=node_recursive)
                     kwargs[key] = value
-            return _call_target(_target_, partial, args, kwargs, full_key)
+            return _call_target(_target_, node_partial, args, kwargs, full_key)
 
         else:
             return {k: instantiate_node(v, recursive=recursive) for k, v in config.items()}
