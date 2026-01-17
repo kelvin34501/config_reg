@@ -212,12 +212,14 @@ class ConfigRegistry:
         self.config = {}
         self.lack_key_list = []
 
-    def reg_seq_type(self, newtype: type):
-        assert isinstance(newtype, type)
+    def reg_seq_type(self, newtype: type) -> None:
+        if not isinstance(newtype, type):
+            raise TypeError(f"Expected a type, got {type(newtype).__name__}: {newtype}")
         self.supported_seq_type.append(newtype)
 
-    def reg_map_type(self, newtype: type):
-        assert isinstance(newtype, type)
+    def reg_map_type(self, newtype: type) -> None:
+        if not isinstance(newtype, type):
+            raise TypeError(f"Expected a type, got {type(newtype).__name__}: {newtype}")
         self.supported_map_type.append(newtype)
 
     def register(

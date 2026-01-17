@@ -129,14 +129,16 @@ def cast_to_res(blob, proclist):
             else:
                 _res = list(_blob)
             next_list = _proclist["next"]
-            assert len(next_list) == 1
+            if len(next_list) != 1:
+                raise ValueError(f"Expected exactly 1 next type for sequence, got {len(next_list)}")
             next_proclist = next_list[0]
             for offset in range(len(_res)):
                 _res[offset] = _cast_to_res(_res[offset], next_proclist)
         elif _proclist["cast"] == "map":
             _res = dict(_blob)
             next_list = _proclist["next"]
-            assert len(next_list) == 2
+            if len(next_list) != 2:
+                raise ValueError(f"Expected exactly 2 next types for map (key, value), got {len(next_list)}")
             _res2 = _res
             _res = {}
             for k, v in _res2.items():

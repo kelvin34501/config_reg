@@ -110,7 +110,8 @@ def _locate(path: str) -> Any:
     for part in parts:
         if not len(part):
             raise ValueError(f"Error loading '{path}': invalid dotstring." + "\nRelative imports are not supported.")
-    assert len(parts) > 0
+    if len(parts) == 0:
+        raise ValueError(f"Error loading '{path}': path resulted in no parts after splitting.")
     part0 = parts[0]
     try:
         obj = import_module(part0)
@@ -215,7 +216,7 @@ def instantiate(config: Any, *args: Any, full_key: str = "", **kwargs: Any) -> A
     target = _get_target_from_config(config)
     if target is None or target == "":
         raise InstantiationException(
-            dedent("""\
+            dedent(f"""\
             Config has missing value for key `_target_`, cannot instantiate.
             Config type: {type(config).__name__}
             Check that the `_target_` key in your dataclass is properly annotated and overridden.

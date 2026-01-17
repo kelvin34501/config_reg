@@ -14,10 +14,19 @@ class ConfigEntryCallback:
         return ConfigEntryValueUnspecified
 
 
-def resolve_callback_dependency(callback_map: typing.Mapping[str, ConfigEntryCallback]):
+def resolve_callback_dependency(callback_map: typing.Mapping[str, ConfigEntryCallback]) -> typing.Optional[list[str]]:
+    """Resolve callback dependencies using topological sort.
+    
+    Args:
+        callback_map: Mapping of key names to their callback objects.
+        
+    Returns:
+        A list of keys in topologically sorted order (dependencies first),
+        or None if there is a cyclic dependency.
+    """
     # obtain adj list
     all_keys = set(callback_map.keys())
-    adj_list = {}
+    adj_list: dict[str, list[str]] = {}
     for k, v in callback_map.items():
         dlist = []
         for d in v.dependency:
@@ -113,14 +122,17 @@ class InterpolationCallback(ConfigEntryCallback):
     def __call__(self, curr_key: str, curr_value: typing.Any, prog: str, dep: typing.Mapping) -> typing.Any:
         from .util import subst_util
         from .index import index_key
-        assert curr_key not in self.key_list, "cyclic dependency"
+        if curr_key in self.key_list:
+            raise ValueError(f"Cyclic dependency detected: key '{curr_key}' references itself in template")
 
         replacement_list = []
         for k in self.key_list:
-            assert k in dep, f"key {k} not found in dependency, got dep: {dep}"
+            if k not in dep:
+                raise KeyError(f"Key '{k}' not found in dependency, got dep keys: {list(dep.keys())}")
             v = dep[k]
             if self.ensure_str:
-                assert isinstance(v, str), f"value {v} is not str"
+                if not isinstance(v, str):
+                    raise TypeError(f"Expected str value for key '{k}', got {type(v).__name__}: {v}")
             replacement_list.append(str(v))
 
         new_value = subst_util.replace_from_span(self.template, self.span_list, replacement_list)
