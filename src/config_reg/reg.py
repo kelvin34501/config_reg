@@ -191,8 +191,9 @@ def check_config_integrity(meta_info_tree, config_tree, prefix=None):
 
 class ConfigRegistry:
 
-    def __init__(self, prog: str = "prog"):
+    def __init__(self, prog: str = "prog", warn_unknown_key: bool = False):
         self.prog = prog
+        self.warn_unknown_key = warn_unknown_key
 
         self.supported_seq_type: list[type] = [list, tuple]
         self.supported_map_type: list[type] = [dict]
@@ -319,12 +320,13 @@ class ConfigRegistry:
             raise KeyError("parser already have string action `-c` or `--cfg`!")
 
         # Register dummy option (actually handled by split_argv_by_cfg, never parsed by argparse)
-        parser.add_argument("-c",
-                            "--cfg",
-                            action="append",
-                            default=argparse.SUPPRESS,
-                            metavar="FILE",
-                            help=f"{self.__class__.__name__} config file (can be interleaved with options in any order)")
+        parser.add_argument(
+            "-c",
+            "--cfg",
+            action="append",
+            default=argparse.SUPPRESS,
+            metavar="FILE",
+            help=f"{self.__class__.__name__} config file (can be interleaved with options in any order)")
 
     def hook_arg(self, parser: Optional[argparse.ArgumentParser] = None):
         if parser is None:
@@ -342,13 +344,59 @@ class ConfigRegistry:
                 # Add default=argparse.SUPPRESS so unprovided args don't appear in namespace
                 parser.add_argument(f"--{entry_key}", default=argparse.SUPPRESS, help=entry_meta.desc)
 
-    def _apply_config_file(self, config_tree, config_filepath, entry_config):
+    def _is_dict_type(self, entry_key: str) -> bool:
+        """Check if a registered key has dict category."""
+        if entry_key not in self.meta_info:
+            return False
+        entry_meta = self.meta_info[entry_key]
+        proclist = self.category_proclist_cache.get(entry_meta.category)
+        if proclist is None:
+            return False
+        return proclist["cast"] == "map"
+
+    def _collect_leaf_keys(self, nested_dict: dict, prefix: str = "") -> list[str]:
+        """
+        Recursively collect all leaf keys from a nested dict as dot-notation strings.
+        
+        Stops recursion if the current key is registered as a dict type (its children
+        are expected to be arbitrary and should not trigger unknown key warnings).
+        """
+        keys = []
+        for k, v in nested_dict.items():
+            full_key = f"{prefix}.{k}" if prefix else k
+            # If this key is registered as dict type, don't recurse into its children
+            if self._is_dict_type(full_key):
+                keys.append(full_key)
+            elif isinstance(v, dict):
+                keys.extend(self._collect_leaf_keys(v, full_key))
+            else:
+                keys.append(full_key)
+        return keys
+
+    def _warn_unknown_keys(self, source_dict: dict, source_name: str) -> list[str]:
+        """
+        Warn about keys in source_dict that are not registered in meta_info.
+        
+        Returns the list of unknown keys (for testing purposes).
+        """
+        all_keys = self._collect_leaf_keys(source_dict)
+        registered_keys = set(self.meta_info.keys())
+        unknown_keys = [k for k in all_keys if k not in registered_keys]
+        if unknown_keys:
+            logger.warning(f"Unknown keys in {source_name} will be ignored: {unknown_keys}")
+        return unknown_keys
+
+    def _apply_config_file(self, config_tree, config_filepath, entry_config, warn_unknown_key: bool = False):
         """Load and apply a single config file."""
         config_ext = os.path.splitext(config_filepath)[1]
         if config_ext in [".yml", ".yaml"]:
             config_blob = load_yaml(config_filepath)
         else:
             raise RuntimeError(f"unsupported config type! got {repr(config_ext)}")
+
+        # Warn about unknown keys if enabled
+        if warn_unknown_key:
+            self._warn_unknown_keys(config_blob, f"config file '{config_filepath}'")
 
         for entry_key in entry_config:
             entry_meta = self.meta_info[entry_key]
@@ -392,6 +440,24 @@ class ConfigRegistry:
             cast_res = cast_to_res(raw_res, self.category_proclist_cache[entry_meta.category])
             set_value(config_tree, entry_key, cast_res)
 
+    def _apply_override(self, config_tree, cfg_override: dict, warn_unknown_key: bool = False):
+        """
+        Apply config overrides from a nested dict.
+        
+        Example: {"model": {"lr": 0.01, "batch_size": 32}}
+        
+        Only keys registered in meta_info are processed (consistent with _apply_config_file).
+        """
+        # Warn about unknown keys if enabled
+        if warn_unknown_key:
+            self._warn_unknown_keys(cfg_override, "cfg_override")
+
+        for entry_key, entry_meta in self.meta_info.items():
+            index_status, raw_value = index_key(cfg_override, entry_key)
+            if index_status:
+                cast_res = cast_to_res(raw_value, self.category_proclist_cache[entry_meta.category])
+                set_value(config_tree, entry_key, cast_res)
+
     def _process_callbacks(self, config_tree):
         """Process all callbacks."""
         entry_callback_map = {}
@@ -423,7 +489,12 @@ class ConfigRegistry:
         self.config = config_tree
         self.lack_key_list = lack_key_list
 
-    def parse(self, parser: Optional[argparse.ArgumentParser] = None, arg_src=None, cfg_override=None, strict=True):
+    def parse(self,
+              parser: Optional[argparse.ArgumentParser] = None,
+              arg_src=None,
+              cfg_override=None,
+              strict=True,
+              warn_unknown_key: Optional[bool] = None):
         """
         Parse config files and command-line arguments in left-to-right order.
 
@@ -431,11 +502,17 @@ class ConfigRegistry:
             parser to parse args from
         :param arg_src: list[str]
             arg list to parse
-        :param cfg_override: str
-            config dict to override
+        :param cfg_override: dict
+            config dict to override (nested format, e.g., {"model": {"lr": 0.01}})
         :param strict: bool
             if True, raise ValueError when required field has unspecified value in config
+        :param warn_unknown_key: bool or None
+            if True, log warning for unknown keys in config files and cfg_override;
+            if None, use the instance attribute self.warn_unknown_key
         """
+        # Resolve warn_unknown_key: per-call value overrides instance attribute
+        _warn_unknown_key = self.warn_unknown_key if warn_unknown_key is None else warn_unknown_key
+
         # 1. Prepare default config
         _config = prepare_default_config(self.meta_info_tree)
 
@@ -446,10 +523,13 @@ class ConfigRegistry:
 
         # 3. Process pre-bound config files (bind_default_config_filepath)
         for config_filepath in self.bind_config_filepath_list:
-            self._apply_config_file(_config, config_filepath, entry_config)
+            self._apply_config_file(_config, config_filepath, entry_config, warn_unknown_key=_warn_unknown_key)
 
         # 4. If no parser, skip command-line parsing
         if parser is None:
+            # Still apply override if provided
+            if cfg_override is not None:
+                self._apply_override(_config, cfg_override, warn_unknown_key=_warn_unknown_key)
             self._process_callbacks(_config)
             self._finalize_config(_config, strict)
             return
@@ -464,14 +544,15 @@ class ConfigRegistry:
         for seg_type, seg_content in segments:
             if seg_type == 'cfg':
                 # Load and apply config file
-                self._apply_config_file(_config, seg_content, entry_config)
+                self._apply_config_file(_config, seg_content, entry_config, warn_unknown_key=_warn_unknown_key)
 
             elif seg_type == 'args':
                 # Parse and apply command-line arguments
                 self._apply_cmdline_args(_config, parser, seg_content)
 
-        # 7. TODO: process override
-        pass
+        # 7. Process override
+        if cfg_override is not None:
+            self._apply_override(_config, cfg_override, warn_unknown_key=_warn_unknown_key)
 
         # 8. Process callbacks
         self._process_callbacks(_config)
