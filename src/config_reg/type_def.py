@@ -117,6 +117,8 @@ def proclist_pattern_paired(proclist, cmdpattern, supported_seq, supported_map):
 def cast_to_res(blob, proclist):
 
     def _cast_to_res(_blob, _proclist):
+        if _blob is None:
+            return None
         _res = _blob
         if _proclist["cast"] == "seq":
             # handle str, int (single element case)
