@@ -1,7 +1,8 @@
+from __future__ import annotations
+
 import re
 
 from typing import Optional
-
 
 match_special = re.compile(r"^\?\((.*)\)$")
 
@@ -60,7 +61,8 @@ def replace_from_span(s: str, span_list: list[tuple[int, int]], replacement_list
         ValueError: If span_list and replacement_list have different lengths.
     """
     if len(span_list) != len(replacement_list):
-        raise ValueError(f"span_list and replacement_list must have same length, got {len(span_list)} and {len(replacement_list)}")
+        raise ValueError(
+            f"span_list and replacement_list must have same length, got {len(span_list)} and {len(replacement_list)}")
     # sort by start index
     span_list = sorted(span_list, key=lambda x: x[0])
     # replace from end to start

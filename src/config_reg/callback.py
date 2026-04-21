@@ -102,6 +102,30 @@ class AbspathCallback(ConfigEntryCallback):
 abspath_callback = AbspathCallback()
 
 
+def _interpolate_template(
+    curr_key: str,
+    template: str,
+    dep: typing.Mapping,
+    ensure_str: bool,
+) -> str:
+    from .util import subst_util
+
+    key_list, span_list = subst_util.extract_special_part(template)
+    if curr_key in key_list:
+        raise ValueError(f"Cyclic dependency detected: key '{curr_key}' references itself in template")
+
+    replacement_list = []
+    for k in key_list:
+        if k not in dep:
+            raise KeyError(f"Key '{k}' not found in dependency, got dep keys: {list(dep.keys())}")
+        v = dep[k]
+        if ensure_str and not isinstance(v, str):
+            raise TypeError(f"Expected str value for key '{k}', got {type(v).__name__}: {v}")
+        replacement_list.append(str(v))
+
+    return subst_util.replace_from_span(template, span_list, replacement_list)
+
+
 class InterpolationCallback(ConfigEntryCallback):
     always: bool = False
 
@@ -120,20 +144,29 @@ class InterpolationCallback(ConfigEntryCallback):
         self.dependency = self.key_list.copy()
 
     def __call__(self, curr_key: str, curr_value: typing.Any, prog: str, dep: typing.Mapping) -> typing.Any:
+        return _interpolate_template(curr_key, self.template, dep, self.ensure_str)
+
+
+class CurrentValueInterpolationCallback(ConfigEntryCallback):
+    always: bool = True
+
+    def __init__(self, default_template: str, dependency: typing.Optional[list[str]] = None, ensure_str=True) -> None:
+        super().__init__()
+
         from .util import subst_util
-        from .index import index_key
-        if curr_key in self.key_list:
-            raise ValueError(f"Cyclic dependency detected: key '{curr_key}' references itself in template")
 
-        replacement_list = []
-        for k in self.key_list:
-            if k not in dep:
-                raise KeyError(f"Key '{k}' not found in dependency, got dep keys: {list(dep.keys())}")
-            v = dep[k]
-            if self.ensure_str:
-                if not isinstance(v, str):
-                    raise TypeError(f"Expected str value for key '{k}', got {type(v).__name__}: {v}")
-            replacement_list.append(str(v))
+        self.default_template = default_template
+        self.ensure_str = ensure_str
 
-        new_value = subst_util.replace_from_span(self.template, self.span_list, replacement_list)
-        return new_value
+        if dependency is None:
+            key_list, _ = subst_util.extract_special_part(self.default_template)
+            self.dependency = key_list.copy()
+        else:
+            self.dependency = dependency.copy()
+
+    def __call__(self, curr_key: str, curr_value: typing.Any, prog: str, dep: typing.Mapping) -> typing.Any:
+        if curr_value == ConfigEntryValueUnspecified:
+            template = self.default_template
+        else:
+            template = str(curr_value)
+        return _interpolate_template(curr_key, template, dep, self.ensure_str)
