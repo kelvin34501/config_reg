@@ -129,6 +129,7 @@ venv.bak/
 /notebook
 /tmp
 /CLAUDE.md
+/AGENTS.md
 
 # jupyter notebook
 *.ipynb
