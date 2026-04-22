@@ -559,6 +559,53 @@ class TestMixedArgparseParsing:
         with pytest.raises(ValueError, match='parser sanity check failed'):
             reg.parse(parser, ['train', '--user-a', 'kept'], strict=False)
 
+    def test_subparser_option_string_collision_is_rejected(self):
+        """Subparser options cannot reuse config_reg-managed option strings."""
+        reg = ConfigRegistry()
+        reg.register('a', category=int, source=ConfigEntrySource.COMMANDLINE_OVER_CONFIG)
+
+        parser = argparse.ArgumentParser()
+        subparsers = parser.add_subparsers(dest='cmd', required=True)
+        train = subparsers.add_parser('train')
+        train.add_argument('--a', dest='user_a')
+        reg.hook(parser)
+
+        with pytest.raises(ValueError, match='reserved option string'):
+            reg.parse(parser, ['train', '--a', 'kept'], strict=False)
+
+    def test_subparser_cfg_option_string_collision_is_rejected(self):
+        """Subparser options cannot reuse the reserved config file flags."""
+        reg = ConfigRegistry()
+        reg.register('a', category=int, source=ConfigEntrySource.COMMANDLINE_OVER_CONFIG, default=1)
+
+        parser = argparse.ArgumentParser()
+        subparsers = parser.add_subparsers(dest='cmd', required=True)
+        train = subparsers.add_parser('train')
+        train.add_argument('--cfg', dest='train_cfg')
+        reg.hook(parser)
+
+        with pytest.raises(ValueError, match='reserved option string'):
+            reg.parse(parser, ['train', '--cfg', 'model.yaml'], strict=False)
+
+    def test_subparser_bool_off_option_string_collision_is_rejected(self):
+        """Subparser options cannot reuse config_reg-generated bool off flags."""
+        reg = ConfigRegistry()
+        reg.register(
+            'flag',
+            category=bool,
+            source=ConfigEntrySource.COMMANDLINE_OVER_CONFIG,
+            cmdpattern=ConfigEntryCommandlineBoolPattern.ON_OFF,
+        )
+
+        parser = argparse.ArgumentParser()
+        subparsers = parser.add_subparsers(dest='cmd', required=True)
+        train = subparsers.add_parser('train')
+        train.add_argument('--flag__off', dest='disable_flag', action='store_true')
+        reg.hook(parser)
+
+        with pytest.raises(ValueError, match='reserved option string'):
+            reg.parse(parser, ['train', '--flag__off'], strict=False)
+
     def test_config_reg_option_abbreviation_is_rejected(self):
         """config_reg-owned options should not be silently parsed via argparse abbreviation."""
         reg = ConfigRegistry()

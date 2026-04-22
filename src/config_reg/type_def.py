@@ -226,16 +226,20 @@ def handle_cmd_map(in_str, sep_type):
 def hook_cmd_bool(parser: argparse.ArgumentParser, key: str, pattern: ConfigEntryCommandlineBoolPattern,
                   meta: ConfigEntryAttr):
     if pattern == ConfigEntryCommandlineBoolPattern.SET_TRUE:
-        parser.add_argument(f"--{key}", action="store_true", default=argparse.SUPPRESS, help=meta.desc)
+        action = parser.add_argument(f"--{key}", action="store_true", default=argparse.SUPPRESS, help=meta.desc)
+        setattr(action, "_config_reg_owned", True)
     elif pattern == ConfigEntryCommandlineBoolPattern.SET_FALSE:
-        parser.add_argument(f"--{key}", action="store_false", default=argparse.SUPPRESS, help=meta.desc)
+        action = parser.add_argument(f"--{key}", action="store_false", default=argparse.SUPPRESS, help=meta.desc)
+        setattr(action, "_config_reg_owned", True)
     elif pattern == ConfigEntryCommandlineBoolPattern.ON_OFF:
-        parser.add_argument(f"--{key}", action="store_true", default=argparse.SUPPRESS, help=meta.desc)
+        action = parser.add_argument(f"--{key}", action="store_true", default=argparse.SUPPRESS, help=meta.desc)
+        setattr(action, "_config_reg_owned", True)
         opt_str = list(parser._option_string_actions.keys())
         if f"--{key}__off" in opt_str:
             raise KeyError(f"parser already have string action `--{key}__off`!")
         off_desc = meta.desc + " (off)" if meta.desc is not None else None
-        parser.add_argument(f"--{key}__off", action="store_true", default=argparse.SUPPRESS, help=off_desc)
+        off_action = parser.add_argument(f"--{key}__off", action="store_true", default=argparse.SUPPRESS, help=off_desc)
+        setattr(off_action, "_config_reg_owned", True)
     else:
         raise TypeError(f"unknown cmdline bool pattern! got {pattern}")
 

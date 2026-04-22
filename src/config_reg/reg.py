@@ -329,7 +329,7 @@ class ConfigRegistry:
             raise KeyError("parser already have string action `-c` or `--cfg`!")
 
         # Register dummy option (actually handled by split_argv_by_cfg, never parsed by argparse)
-        parser.add_argument(
+        action = parser.add_argument(
             "-c",
             "--cfg",
             dest=self._CFG_DEST,
@@ -337,6 +337,7 @@ class ConfigRegistry:
             default=argparse.SUPPRESS,
             metavar="FILE",
             help=f"{self.__class__.__name__} config file (can be interleaved with options in any order)")
+        setattr(action, "_config_reg_owned", True)
 
     def hook_arg(self, parser: Optional[argparse.ArgumentParser] = None):
         if parser is None:
@@ -352,7 +353,8 @@ class ConfigRegistry:
                 hook_cmd_bool(parser, entry_key, entry_meta.cmdpattern, entry_meta)
             else:
                 # Add default=argparse.SUPPRESS so unprovided args don't appear in namespace
-                parser.add_argument(f"--{entry_key}", default=argparse.SUPPRESS, help=entry_meta.desc)
+                action = parser.add_argument(f"--{entry_key}", default=argparse.SUPPRESS, help=entry_meta.desc)
+                setattr(action, "_config_reg_owned", True)
 
     def _collect_cmdline_entry_key_list(self) -> list[str]:
         return [
@@ -392,11 +394,7 @@ class ConfigRegistry:
         self.hook_arg(cmdline_parser)
         return cmdline_parser
 
-    def _check_parser_sanity(self, parser: argparse.ArgumentParser) -> None:
-        """Reject user-defined argparse destinations that collide with config_reg-managed namespace keys."""
-        ignored_keys = self._collect_cmdline_namespace_keys()
-        config_option_strings = self._collect_cmdline_option_strings()
-        conflict_list = []
+    def _iter_parser_actions(self, parser: argparse.ArgumentParser):
         visited = set()
 
         def _walk(_parser: argparse.ArgumentParser):
@@ -406,24 +404,42 @@ class ConfigRegistry:
             visited.add(parser_id)
 
             for action in _parser._actions:
-                if action.dest in ignored_keys:
-                    action_option_strings = set(action.option_strings)
-                    if not action_option_strings or not action_option_strings.issubset(config_option_strings):
-                        if action_option_strings:
-                            conflict_name = "/".join(action.option_strings)
-                        else:
-                            conflict_name = f"<positional:{action.dest}>"
-                        conflict_list.append((conflict_name, action.dest))
-
+                yield action
                 if isinstance(action, argparse._SubParsersAction):
                     for subparser in action.choices.values():
-                        _walk(subparser)
+                        yield from _walk(subparser)
 
-        _walk(parser)
+        yield from _walk(parser)
+
+    def _check_parser_sanity(self, parser: argparse.ArgumentParser) -> None:
+        """Reject user-defined argparse destinations and option strings that collide with config_reg."""
+        ignored_keys = self._collect_cmdline_namespace_keys()
+        config_option_strings = self._collect_cmdline_option_strings()
+        conflict_list = []
+
+        for action in self._iter_parser_actions(parser):
+            if getattr(action, "_config_reg_owned", False):
+                continue
+
+            issue_list = []
+            conflict_options = sorted(set(action.option_strings) & config_option_strings)
+            if conflict_options:
+                option_text = ", ".join(conflict_options)
+                issue_list.append(f"reserved option string(s) {option_text}")
+
+            if action.dest in ignored_keys:
+                issue_list.append(f"reserved dest '{action.dest}'")
+
+            if issue_list:
+                if action.option_strings:
+                    conflict_name = "/".join(action.option_strings)
+                else:
+                    conflict_name = f"<positional:{action.dest}>"
+                conflict_list.append(f"{conflict_name} conflicts with {' and '.join(issue_list)}")
 
         if conflict_list:
-            conflict_str = ", ".join(f"{conflict_name} -> dest '{dest}'" for conflict_name, dest in conflict_list)
-            raise ValueError("parser sanity check failed: user-defined argparse dest collides with "
+            conflict_str = ", ".join(conflict_list)
+            raise ValueError("parser sanity check failed: user-defined argparse action collides with "
                              f"config_reg-managed namespace: {conflict_str}")
 
     def _collect_cmdline_namespace_keys(self) -> set[str]:
