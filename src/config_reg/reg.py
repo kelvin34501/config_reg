@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from .type_def import ConfigEntrySource, ConfigEntryValueUnspecified, analyze_type, cast_to_res
 from .type_def import (
     ConfigEntryCommandlinePattern,
+    ConfigEntryCommandlineBoolPattern,
     ConfigEntryCommandlineSeqPattern,
     ConfigEntryCommandlineMapPattern,
 )
@@ -28,6 +29,12 @@ from .if_yaml import load_yaml
 from copy import deepcopy
 
 logger = logging.getLogger(__name__)
+
+
+class _ConfigRegArgumentParser(argparse.ArgumentParser):
+
+    def error(self, message):
+        raise argparse.ArgumentError(None, message)
 
 
 def split_argv_by_cfg(argv: list[str]) -> list[tuple[str, any]]:
@@ -191,6 +198,8 @@ def check_config_integrity(meta_info_tree, config_tree, prefix=None):
 
 class ConfigRegistry:
 
+    _CFG_DEST = "_config_reg_cfg_file_list"
+
     def __init__(self, prog: str = "prog", warn_unknown_key: bool = False):
         self.prog = prog
         self.warn_unknown_key = warn_unknown_key
@@ -323,6 +332,7 @@ class ConfigRegistry:
         parser.add_argument(
             "-c",
             "--cfg",
+            dest=self._CFG_DEST,
             action="append",
             default=argparse.SUPPRESS,
             metavar="FILE",
@@ -343,6 +353,132 @@ class ConfigRegistry:
             else:
                 # Add default=argparse.SUPPRESS so unprovided args don't appear in namespace
                 parser.add_argument(f"--{entry_key}", default=argparse.SUPPRESS, help=entry_meta.desc)
+
+    def _collect_cmdline_entry_key_list(self) -> list[str]:
+        return [
+            entry_key for entry_key, entry_meta in self.meta_info.items() if entry_meta.source in (
+                ConfigEntrySource.COMMANDLINE_ONLY,
+                ConfigEntrySource.COMMANDLINE_OVER_CONFIG,
+            )
+        ]
+
+    def _collect_cmdline_option_strings(self) -> set[str]:
+        option_strings = {"-c", "--cfg"}
+        entry_cmdline = self._collect_cmdline_entry_key_list()
+        for entry_key in entry_cmdline:
+            option_strings.add(f"--{entry_key}")
+            entry_meta = self.meta_info[entry_key]
+            if entry_meta.category == bool and entry_meta.cmdpattern is not None:
+                if entry_meta.cmdpattern == ConfigEntryCommandlineBoolPattern.ON_OFF:
+                    option_strings.add(f"--{entry_key}__off")
+        return option_strings
+
+    def _build_cmdline_parser(self, parser: Optional[argparse.ArgumentParser] = None) -> argparse.ArgumentParser:
+        parser_kwargs = {
+            "add_help": False,
+            "allow_abbrev": False,
+        }
+        if parser is not None:
+            # Only inherit parsing behaviors that affect how argv is interpreted.
+            for attr_name in ("fromfile_prefix_chars",):
+                if hasattr(parser, attr_name):
+                    parser_kwargs[attr_name] = getattr(parser, attr_name)
+
+        cmdline_parser = _ConfigRegArgumentParser(**parser_kwargs)
+        if parser is not None:
+            if getattr(parser, "fromfile_prefix_chars", None):
+                cmdline_parser.convert_arg_line_to_args = parser.convert_arg_line_to_args
+
+        self.hook_arg(cmdline_parser)
+        return cmdline_parser
+
+    def _check_parser_sanity(self, parser: argparse.ArgumentParser) -> None:
+        """Reject user-defined argparse destinations that collide with config_reg-managed namespace keys."""
+        ignored_keys = self._collect_cmdline_namespace_keys()
+        config_option_strings = self._collect_cmdline_option_strings()
+        conflict_list = []
+        visited = set()
+
+        def _walk(_parser: argparse.ArgumentParser):
+            parser_id = id(_parser)
+            if parser_id in visited:
+                return
+            visited.add(parser_id)
+
+            for action in _parser._actions:
+                if action.dest in ignored_keys:
+                    action_option_strings = set(action.option_strings)
+                    if not action_option_strings or not action_option_strings.issubset(config_option_strings):
+                        if action_option_strings:
+                            conflict_name = "/".join(action.option_strings)
+                        else:
+                            conflict_name = f"<positional:{action.dest}>"
+                        conflict_list.append((conflict_name, action.dest))
+
+                if isinstance(action, argparse._SubParsersAction):
+                    for subparser in action.choices.values():
+                        _walk(subparser)
+
+        _walk(parser)
+
+        if conflict_list:
+            conflict_str = ", ".join(f"{conflict_name} -> dest '{dest}'" for conflict_name, dest in conflict_list)
+            raise ValueError("parser sanity check failed: user-defined argparse dest collides with "
+                             f"config_reg-managed namespace: {conflict_str}")
+
+    def _collect_cmdline_namespace_keys(self) -> set[str]:
+        entry_cmdline = self._collect_cmdline_entry_key_list()
+        keys = set(entry_cmdline)
+        for entry_key in entry_cmdline:
+            entry_meta = self.meta_info[entry_key]
+            if entry_meta.category == bool and entry_meta.cmdpattern is not None:
+                if entry_meta.cmdpattern == ConfigEntryCommandlineBoolPattern.ON_OFF:
+                    keys.add(f"{entry_key}__off")
+        keys.add(self._CFG_DEST)
+        return keys
+
+    def _extract_user_argv(self, segments, cmdline_parser) -> list[str]:
+        """Remove config_reg-owned args and cfg markers while preserving user argv order."""
+        user_argv = []
+        for seg_type, seg_content in segments:
+            if seg_type != 'args':
+                continue
+
+            _, remaining_args = cmdline_parser.parse_known_args(seg_content)
+            user_argv.extend(remaining_args)
+
+        return user_argv
+
+    def _reject_configreg_abbrev(self, argv: list[str], parser: argparse.ArgumentParser,
+                                 cmdline_parser: argparse.ArgumentParser) -> None:
+        """Reject long-option abbreviations that would otherwise be consumed only by the final parser."""
+        config_option_strings = self._collect_cmdline_option_strings()
+        if not config_option_strings:
+            return
+
+        parser_option_strings = set(parser._option_string_actions.keys())
+        non_config_option_strings = parser_option_strings - config_option_strings
+        stop_option_parsing = False
+
+        for arg in argv:
+            if stop_option_parsing:
+                continue
+            if arg == "--":
+                stop_option_parsing = True
+                continue
+            if not arg.startswith("--"):
+                continue
+
+            option_token = arg.split("=", 1)[0]
+            if option_token in parser_option_strings:
+                continue
+
+            config_matches = [opt for opt in config_option_strings if opt.startswith(option_token)]
+            user_matches = [opt for opt in non_config_option_strings if opt.startswith(option_token)]
+            if len(config_matches) == 1 and not user_matches:
+                raise argparse.ArgumentError(
+                    None, f"config_reg option abbreviations are not supported: {option_token}. "
+                    f"Use '{config_matches[0]}' explicitly.")
 
     def _is_dict_type(self, entry_key: str) -> bool:
         """Check if a registered key has dict category."""
@@ -407,14 +543,12 @@ class ConfigRegistry:
 
     def _apply_cmdline_args(self, config_tree, parser, argv_segment):
         """Parse and apply a single command-line argument segment."""
-        # Parse this segment
-        namespace = parser.parse_args(argv_segment)
+        # Parse only config_reg-owned options and ignore user-defined argparse options.
+        namespace, _ = parser.parse_known_args(argv_segment)
         parsed_dict = vars(namespace)  # Convert to dict
 
         # Only process explicitly provided args (due to SUPPRESS)
-        entry_cmdline = list(entry_key for entry_key, entry_meta in self.meta_info.items()
-                             if entry_meta.source in (ConfigEntrySource.COMMANDLINE_ONLY,
-                                                      ConfigEntrySource.COMMANDLINE_OVER_CONFIG))
+        entry_cmdline = self._collect_cmdline_entry_key_list()
 
         for entry_key in entry_cmdline:
             entry_meta = self.meta_info[entry_key]
@@ -481,20 +615,33 @@ class ConfigRegistry:
             if callback_value != ConfigEntryValueUnspecified:
                 set_value(config_tree, entry_key, callback_value)
 
-    def _finalize_config(self, config_tree, strict):
-        """Validate integrity and save config."""
+    def _validate_config(self, config_tree, strict):
+        """Validate integrity without mutating stored state."""
         is_good, lack_key_list = check_config_integrity(self.meta_info_tree, config_tree)
         if strict and (not is_good):
             raise ValueError(f"unspecified value in config! key: {lack_key_list}")
+        return lack_key_list
+
+    def _save_config(self, config_tree, lack_key_list):
+        """Persist the validated config to the registry state."""
         self.config = config_tree
         self.lack_key_list = lack_key_list
+
+    def _strip_configreg_namespace(self, namespace: argparse.Namespace) -> argparse.Namespace:
+        stripped_namespace = argparse.Namespace()
+        ignored_keys = self._collect_cmdline_namespace_keys()
+        for key, value in vars(namespace).items():
+            if key in ignored_keys:
+                continue
+            setattr(stripped_namespace, key, value)
+        return stripped_namespace
 
     def parse(self,
               parser: Optional[argparse.ArgumentParser] = None,
               arg_src=None,
               cfg_override=None,
               strict=True,
-              warn_unknown_key: Optional[bool] = None):
+              warn_unknown_key: Optional[bool] = None) -> Optional[argparse.Namespace]:
         """
         Parse config files and command-line arguments in left-to-right order.
 
@@ -509,6 +656,9 @@ class ConfigRegistry:
         :param warn_unknown_key: bool or None
             if True, log warning for unknown keys in config files and cfg_override;
             if None, use the instance attribute self.warn_unknown_key
+        :return:
+            If parser is provided, returns the parsed argparse.Namespace with
+            config_reg-owned options stripped out. Otherwise returns None.
         """
         # Resolve warn_unknown_key: per-call value overrides instance attribute
         _warn_unknown_key = self.warn_unknown_key if warn_unknown_key is None else warn_unknown_key
@@ -531,14 +681,20 @@ class ConfigRegistry:
             if cfg_override is not None:
                 self._apply_override(_config, cfg_override, warn_unknown_key=_warn_unknown_key)
             self._process_callbacks(_config)
-            self._finalize_config(_config, strict)
-            return
+            lack_key_list = self._validate_config(_config, strict)
+            self._save_config(_config, lack_key_list)
+            return None
 
         # 5. Segment-based argv processing
         if arg_src is None:
             arg_src = sys.argv[1:]
+        else:
+            arg_src = list(arg_src)
+
+        self._check_parser_sanity(parser)
 
         segments = split_argv_by_cfg(arg_src)
+        cmdline_parser = self._build_cmdline_parser(parser)
 
         # 6. Process each segment in order
         for seg_type, seg_content in segments:
@@ -548,7 +704,7 @@ class ConfigRegistry:
 
             elif seg_type == 'args':
                 # Parse and apply command-line arguments
-                self._apply_cmdline_args(_config, parser, seg_content)
+                self._apply_cmdline_args(_config, cmdline_parser, seg_content)
 
         # 7. Process override
         if cfg_override is not None:
@@ -557,8 +713,18 @@ class ConfigRegistry:
         # 8. Process callbacks
         self._process_callbacks(_config)
 
-        # 9. Validate and save config
-        self._finalize_config(_config, strict)
+        # 9. Validate config before running the user parser.
+        lack_key_list = self._validate_config(_config, strict)
+
+        # 10. Strip config_reg-owned args before running the user parser.
+        user_arg_src = self._extract_user_argv(segments, cmdline_parser)
+        self._reject_configreg_abbrev(user_arg_src, parser, cmdline_parser)
+        namespace = parser.parse_args(user_arg_src)
+        stripped_namespace = self._strip_configreg_namespace(namespace)
+
+        # 11. Save config only after the full mixed parse succeeds.
+        self._save_config(_config, lack_key_list)
+        return stripped_namespace
 
     def select(self, prefix: Optional[str] = None, strip=False):
         cfg = deepcopy(self.config)

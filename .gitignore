@@ -130,6 +130,7 @@ venv.bak/
 /tmp
 /CLAUDE.md
 /AGENTS.md
+/.github/copilot-instructions.md
 
 # jupyter notebook
 *.ipynb

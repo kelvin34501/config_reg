@@ -518,6 +518,247 @@ class TestNestedKeys:
         assert reg.select()['opt']['learning_rate'] == 0.1  # config overrides
 
 
+class TestMixedArgparseParsing:
+    """Tests for mixing config_reg options with user-defined argparse options."""
+
+    def test_user_option_dest_collision_is_rejected(self):
+        """User-defined options cannot reuse config_reg-managed dest names."""
+        reg = ConfigRegistry()
+        reg.register('a', category=int, source=ConfigEntrySource.COMMANDLINE_OVER_CONFIG)
+
+        parser = argparse.ArgumentParser()
+        parser.add_argument('--user-a', dest='a')
+        reg.hook(parser)
+
+        with pytest.raises(ValueError, match='parser sanity check failed'):
+            reg.parse(parser, ['--user-a', 'kept'], strict=False)
+
+    def test_user_positional_dest_collision_is_rejected(self):
+        """User-defined positional args cannot reuse config_reg-managed dest names."""
+        reg = ConfigRegistry()
+        reg.register('a', category=int, source=ConfigEntrySource.COMMANDLINE_OVER_CONFIG)
+
+        parser = argparse.ArgumentParser()
+        parser.add_argument('a')
+        reg.hook(parser)
+
+        with pytest.raises(ValueError, match='parser sanity check failed'):
+            reg.parse(parser, ['kept'], strict=False)
+
+    def test_subparser_dest_collision_is_rejected(self):
+        """Sanity checks should recurse into subparsers as well."""
+        reg = ConfigRegistry()
+        reg.register('a', category=int, source=ConfigEntrySource.COMMANDLINE_OVER_CONFIG)
+
+        parser = argparse.ArgumentParser()
+        subparsers = parser.add_subparsers(dest='cmd', required=True)
+        train = subparsers.add_parser('train')
+        train.add_argument('--user-a', dest='a')
+        reg.hook(parser)
+
+        with pytest.raises(ValueError, match='parser sanity check failed'):
+            reg.parse(parser, ['train', '--user-a', 'kept'], strict=False)
+
+    def test_config_reg_option_abbreviation_is_rejected(self):
+        """config_reg-owned options should not be silently parsed via argparse abbreviation."""
+        reg = ConfigRegistry()
+        reg.register('alpha_option', category=int, source=ConfigEntrySource.COMMANDLINE_OVER_CONFIG)
+
+        parser = argparse.ArgumentParser()
+        reg.hook(parser)
+
+        with pytest.raises(argparse.ArgumentError, match='config_reg option abbreviations are not supported'):
+            reg.parse(parser, ['--alpha_o', '3'], strict=False)
+
+    def test_user_option_abbreviation_still_works(self, temp_config_dir):
+        """User-defined argparse options should keep the parser's abbreviation behavior."""
+        cfg1_path = create_yaml_file(temp_config_dir, 'cfg1.yaml', {'a': 10})
+
+        reg = ConfigRegistry()
+        reg.register('a', category=int, source=ConfigEntrySource.COMMANDLINE_OVER_CONFIG)
+
+        parser = argparse.ArgumentParser()
+        parser.add_argument('--global-option')
+        reg.hook(parser)
+
+        namespace = reg.parse(parser, ['--glob', 'kept', '-c', cfg1_path], strict=False)
+
+        assert vars(namespace) == {'global_option': 'kept'}
+        assert reg.select()['a'] == 10
+
+    def test_fromfile_prefix_chars_applies_to_config_reg_options(self, temp_config_dir):
+        """Internal config_reg parsing should respect the caller's fromfile_prefix_chars setting."""
+        argfile_path = os.path.join(temp_config_dir, 'args.txt')
+        with open(argfile_path, 'w') as f:
+            f.write('--a\n7\n')
+
+        reg = ConfigRegistry()
+        reg.register('a', category=int, source=ConfigEntrySource.COMMANDLINE_OVER_CONFIG)
+
+        parser = argparse.ArgumentParser(fromfile_prefix_chars='@')
+        reg.hook(parser)
+
+        namespace = reg.parse(parser, [f'@{argfile_path}'], strict=False)
+
+        assert vars(namespace) == {}
+        assert reg.select()['a'] == 7
+
+    def test_custom_parser_error_handler_is_not_used_for_internal_parse_errors(self):
+        """Internal parser failures should raise ArgumentError instead of using user parser handlers."""
+
+        class RaisingParser(argparse.ArgumentParser):
+
+            def error(self, message):
+                raise RuntimeError(message)
+
+        reg = ConfigRegistry()
+        reg.register('a', category=int, source=ConfigEntrySource.COMMANDLINE_OVER_CONFIG)
+
+        parser = RaisingParser()
+        reg.hook(parser)
+
+        with pytest.raises(argparse.ArgumentError, match='expected one argument'):
+            reg.parse(parser, ['--a'], strict=False)
+
+    def test_required_user_arg_can_appear_in_later_segment(self, temp_config_dir):
+        """User-defined required args should be validated only after config_reg finishes."""
+        cfg1_path = create_yaml_file(temp_config_dir, 'cfg1.yaml', {'a': 10})
+
+        reg = ConfigRegistry()
+        reg.register('a', category=int, source=ConfigEntrySource.COMMANDLINE_OVER_CONFIG)
+
+        parser = argparse.ArgumentParser()
+        parser.add_argument('--x')
+        parser.add_argument('--name', required=True)
+        reg.hook(parser)
+
+        namespace = reg.parse(parser, ['--x', '1', '-c', cfg1_path, '--name', 'ok'], strict=False)
+
+        assert vars(namespace) == {'x': '1', 'name': 'ok'}
+        assert reg.select()['a'] == 10
+
+    def test_missing_required_user_arg_still_fails(self, temp_config_dir):
+        """Final parser validation should still raise for missing user args."""
+        cfg1_path = create_yaml_file(temp_config_dir, 'cfg1.yaml', {'a': 10})
+
+        reg = ConfigRegistry()
+        reg.register('a', category=int, source=ConfigEntrySource.COMMANDLINE_OVER_CONFIG)
+
+        parser = argparse.ArgumentParser()
+        parser.add_argument('--name', required=True)
+        reg.hook(parser)
+
+        with pytest.raises(SystemExit, match='2'):
+            reg.parse(parser, ['-c', cfg1_path], strict=False)
+
+    def test_mutually_exclusive_group_validates_on_final_parse(self, temp_config_dir):
+        """User-defined mutually exclusive groups should survive segmented config parsing."""
+        cfg1_path = create_yaml_file(temp_config_dir, 'cfg1.yaml', {'a': 10})
+
+        reg = ConfigRegistry()
+        reg.register('a', category=int, source=ConfigEntrySource.COMMANDLINE_OVER_CONFIG)
+
+        parser = argparse.ArgumentParser()
+        group = parser.add_mutually_exclusive_group(required=True)
+        group.add_argument('--left', action='store_true')
+        group.add_argument('--right', action='store_true')
+        reg.hook(parser)
+
+        namespace = reg.parse(parser, ['--left', '-c', cfg1_path], strict=False)
+
+        assert vars(namespace) == {'left': True, 'right': False}
+        assert reg.select()['a'] == 10
+
+    def test_mutually_exclusive_group_error_still_surfaces(self, temp_config_dir):
+        """Invalid mutually exclusive user args should fail during final parser validation."""
+        cfg1_path = create_yaml_file(temp_config_dir, 'cfg1.yaml', {'a': 10})
+
+        reg = ConfigRegistry()
+        reg.register('a', category=int, source=ConfigEntrySource.COMMANDLINE_OVER_CONFIG)
+
+        parser = argparse.ArgumentParser()
+        group = parser.add_mutually_exclusive_group(required=True)
+        group.add_argument('--left', action='store_true')
+        group.add_argument('--right', action='store_true')
+        reg.hook(parser)
+
+        with pytest.raises(SystemExit, match='2'):
+            reg.parse(parser, ['--left', '-c', cfg1_path, '--right'], strict=False)
+
+    def test_subcommand_namespace_is_preserved(self, temp_config_dir):
+        """Final Namespace should preserve user-defined subcommand parsing."""
+        cfg1_path = create_yaml_file(temp_config_dir, 'cfg1.yaml', {'a': 10})
+
+        reg = ConfigRegistry()
+        reg.register('a', category=int, source=ConfigEntrySource.COMMANDLINE_OVER_CONFIG)
+
+        parser = argparse.ArgumentParser()
+        parser.add_argument('--global-opt')
+        subparsers = parser.add_subparsers(dest='cmd', required=True)
+        train = subparsers.add_parser('train')
+        train.add_argument('--epochs', type=int, required=True)
+        reg.hook(parser)
+
+        namespace = reg.parse(parser, ['--global-opt', 'x', '-c', cfg1_path, 'train', '--epochs', '3'], strict=False)
+
+        assert vars(namespace) == {'global_opt': 'x', 'cmd': 'train', 'epochs': 3}
+        assert reg.select()['a'] == 10
+
+    def test_returned_namespace_strips_config_reg_options(self):
+        """Returned Namespace should expose only user-defined argparse values."""
+        reg = ConfigRegistry()
+        reg.register('a', category=int, source=ConfigEntrySource.COMMANDLINE_OVER_CONFIG)
+        reg.register(
+            'flag',
+            category=bool,
+            source=ConfigEntrySource.COMMANDLINE_OVER_CONFIG,
+            cmdpattern=ConfigEntryCommandlineBoolPattern.ON_OFF,
+        )
+
+        parser = argparse.ArgumentParser()
+        parser.add_argument('--user-opt')
+        reg.hook(parser)
+
+        namespace = reg.parse(parser, ['--user-opt', 'kept', '--a', '3', '--flag'], strict=False)
+
+        assert vars(namespace) == {'user_opt': 'kept'}
+        assert reg.select()['a'] == 3
+        assert reg.select()['flag'] is True
+
+    def test_double_dash_stops_config_reg_parsing_end_to_end(self):
+        """Tokens after '--' should remain user arguments and not update config_reg state."""
+        reg = ConfigRegistry()
+        reg.register('a', category=int, source=ConfigEntrySource.COMMANDLINE_OVER_CONFIG, default=1)
+
+        parser = argparse.ArgumentParser()
+        parser.add_argument('rest', nargs='*')
+        reg.hook(parser)
+
+        namespace = reg.parse(parser, ['--a', '5', '--', '--a', '7', '-c', 'ignored.yaml'], strict=False)
+
+        assert vars(namespace) == {'rest': ['--a', '7', '-c', 'ignored.yaml']}
+        assert reg.select()['a'] == 5
+
+    def test_failed_final_parse_keeps_previous_config_state(self):
+        """Registry state should only update after the full mixed parse succeeds."""
+        reg = ConfigRegistry()
+        reg.register('a', category=int, source=ConfigEntrySource.COMMANDLINE_OVER_CONFIG, default=1)
+
+        parser = argparse.ArgumentParser()
+        parser.add_argument('--name', required=True)
+        reg.hook(parser)
+
+        namespace = reg.parse(parser, ['--a', '5', '--name', 'ok'], strict=False)
+
+        assert vars(namespace) == {'name': 'ok'}
+        assert reg.select()['a'] == 5
+
+        with pytest.raises(SystemExit, match='2'):
+            reg.parse(parser, ['--a', '9'], strict=False)
+
+        assert reg.select()['a'] == 5
+
+
 class TestBindDefaultConfig:
     """Tests for bind_default_config_filepath"""
 
