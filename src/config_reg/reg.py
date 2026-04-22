@@ -375,22 +375,12 @@ class ConfigRegistry:
                     option_strings.add(f"--{entry_key}__off")
         return option_strings
 
-    def _build_cmdline_parser(self, parser: Optional[argparse.ArgumentParser] = None) -> argparse.ArgumentParser:
+    def _build_cmdline_parser(self) -> argparse.ArgumentParser:
         parser_kwargs = {
             "add_help": False,
             "allow_abbrev": False,
         }
-        if parser is not None:
-            # Only inherit parsing behaviors that affect how argv is interpreted.
-            for attr_name in ("fromfile_prefix_chars",):
-                if hasattr(parser, attr_name):
-                    parser_kwargs[attr_name] = getattr(parser, attr_name)
-
         cmdline_parser = _ConfigRegArgumentParser(**parser_kwargs)
-        if parser is not None:
-            if getattr(parser, "fromfile_prefix_chars", None):
-                cmdline_parser.convert_arg_line_to_args = parser.convert_arg_line_to_args
-
         self.hook_arg(cmdline_parser)
         return cmdline_parser
 
@@ -410,6 +400,34 @@ class ConfigRegistry:
                         yield from _walk(subparser)
 
         yield from _walk(parser)
+
+    def _expand_fromfile_args(self, parser: argparse.ArgumentParser, arg_src: list[str]) -> list[str]:
+        """Expand @argfile references using argparse-compatible recursion and line conversion."""
+        fromfile_prefix_chars = getattr(parser, "fromfile_prefix_chars", None)
+        if not fromfile_prefix_chars:
+            return list(arg_src)
+
+        expanded_args = []
+        for arg in arg_src:
+            if not arg or arg[0] not in fromfile_prefix_chars:
+                expanded_args.append(arg)
+                continue
+
+            try:
+                with open(
+                        arg[1:],
+                        encoding=sys.getfilesystemencoding(),
+                        errors=sys.getfilesystemencodeerrors(),
+                ) as args_file:
+                    nested_args = []
+                    for arg_line in args_file.read().splitlines():
+                        for converted_arg in parser.convert_arg_line_to_args(arg_line):
+                            nested_args.append(converted_arg)
+                    expanded_args.extend(self._expand_fromfile_args(parser, nested_args))
+            except OSError as err:
+                raise argparse.ArgumentError(None, str(err))
+
+        return expanded_args
 
     def _check_parser_sanity(self, parser: argparse.ArgumentParser) -> None:
         """Reject user-defined argparse destinations and option strings that collide with config_reg."""
@@ -465,8 +483,7 @@ class ConfigRegistry:
 
         return user_argv
 
-    def _reject_configreg_abbrev(self, argv: list[str], parser: argparse.ArgumentParser,
-                                 cmdline_parser: argparse.ArgumentParser) -> None:
+    def _reject_configreg_abbrev(self, argv: list[str], parser: argparse.ArgumentParser) -> None:
         """Reject long-option abbreviations that would otherwise be consumed only by the final parser."""
         config_option_strings = self._collect_cmdline_option_strings()
         if not config_option_strings:
@@ -708,9 +725,10 @@ class ConfigRegistry:
             arg_src = list(arg_src)
 
         self._check_parser_sanity(parser)
+        arg_src = self._expand_fromfile_args(parser, arg_src)
 
         segments = split_argv_by_cfg(arg_src)
-        cmdline_parser = self._build_cmdline_parser(parser)
+        cmdline_parser = self._build_cmdline_parser()
 
         # 6. Process each segment in order
         for seg_type, seg_content in segments:
@@ -734,7 +752,7 @@ class ConfigRegistry:
 
         # 10. Strip config_reg-owned args before running the user parser.
         user_arg_src = self._extract_user_argv(segments, cmdline_parser)
-        self._reject_configreg_abbrev(user_arg_src, parser, cmdline_parser)
+        self._reject_configreg_abbrev(user_arg_src, parser)
         namespace = parser.parse_args(user_arg_src)
         stripped_namespace = self._strip_configreg_namespace(namespace)
 

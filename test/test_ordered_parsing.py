@@ -650,6 +650,103 @@ class TestMixedArgparseParsing:
         assert vars(namespace) == {}
         assert reg.select()['a'] == 7
 
+    def test_fromfile_cfg_two_token_is_applied(self, temp_config_dir):
+        """Config files referenced as '--cfg path' inside @argfile should be loaded."""
+        cfg1_path = create_yaml_file(temp_config_dir, 'cfg1.yaml', {'a': 10})
+        argfile_path = os.path.join(temp_config_dir, 'args_cfg_two_token.txt')
+        with open(argfile_path, 'w') as f:
+            f.write(f'--cfg\n{cfg1_path}\n')
+
+        reg = ConfigRegistry()
+        reg.register('a', category=int, source=ConfigEntrySource.COMMANDLINE_OVER_CONFIG, default=1)
+
+        parser = argparse.ArgumentParser(fromfile_prefix_chars='@')
+        reg.hook(parser)
+
+        namespace = reg.parse(parser, [f'@{argfile_path}'], strict=False)
+
+        assert vars(namespace) == {}
+        assert reg.select()['a'] == 10
+
+    def test_fromfile_cfg_equals_is_applied(self, temp_config_dir):
+        """Config files referenced as '--cfg=path' inside @argfile should be loaded."""
+        cfg1_path = create_yaml_file(temp_config_dir, 'cfg1.yaml', {'a': 10})
+        argfile_path = os.path.join(temp_config_dir, 'args_cfg_equals.txt')
+        with open(argfile_path, 'w') as f:
+            f.write(f'--cfg={cfg1_path}\n')
+
+        reg = ConfigRegistry()
+        reg.register('a', category=int, source=ConfigEntrySource.COMMANDLINE_OVER_CONFIG, default=1)
+
+        parser = argparse.ArgumentParser(fromfile_prefix_chars='@')
+        reg.hook(parser)
+
+        namespace = reg.parse(parser, [f'@{argfile_path}'], strict=False)
+
+        assert vars(namespace) == {}
+        assert reg.select()['a'] == 10
+
+    def test_nested_fromfile_preserves_cfg_order(self, temp_config_dir):
+        """Nested @argfile expansion should preserve left-to-right config/arg ordering."""
+        cfg1_path = create_yaml_file(temp_config_dir, 'cfg1.yaml', {'a': 10})
+        inner_argfile_path = os.path.join(temp_config_dir, 'inner_args.txt')
+        outer_argfile_path = os.path.join(temp_config_dir, 'outer_args.txt')
+
+        with open(inner_argfile_path, 'w') as f:
+            f.write('--a\n7\n--cfg\n')
+            f.write(f'{cfg1_path}\n')
+
+        with open(outer_argfile_path, 'w') as f:
+            f.write(f'@{inner_argfile_path}\n')
+            f.write('--a\n9\n')
+
+        reg = ConfigRegistry()
+        reg.register('a', category=int, source=ConfigEntrySource.COMMANDLINE_OVER_CONFIG, default=1)
+
+        parser = argparse.ArgumentParser(fromfile_prefix_chars='@')
+        reg.hook(parser)
+
+        namespace = reg.parse(parser, [f'@{outer_argfile_path}'], strict=False)
+
+        assert vars(namespace) == {}
+        assert reg.select()['a'] == 9
+
+    def test_fromfile_uses_custom_convert_arg_line_to_args(self, temp_config_dir):
+        """@argfile expansion should respect the caller parser's custom line splitting."""
+        cfg1_path = create_yaml_file(temp_config_dir, 'cfg1.yaml', {'a': 10})
+        argfile_path = os.path.join(temp_config_dir, 'args_custom_convert.txt')
+        with open(argfile_path, 'w') as f:
+            f.write('--cfg ')
+            f.write(f'{cfg1_path}\n')
+            f.write('--a 11\n')
+
+        reg = ConfigRegistry()
+        reg.register('a', category=int, source=ConfigEntrySource.COMMANDLINE_OVER_CONFIG, default=1)
+
+        class LineSplitParser(argparse.ArgumentParser):
+
+            def convert_arg_line_to_args(self, arg_line):
+                return arg_line.split()
+
+        parser = LineSplitParser(fromfile_prefix_chars='@')
+        reg.hook(parser)
+
+        namespace = reg.parse(parser, [f'@{argfile_path}'], strict=False)
+
+        assert vars(namespace) == {}
+        assert reg.select()['a'] == 11
+
+    def test_missing_fromfile_raises_argument_error(self):
+        """Missing @argfile paths should surface as argparse.ArgumentError."""
+        reg = ConfigRegistry()
+        reg.register('a', category=int, source=ConfigEntrySource.COMMANDLINE_OVER_CONFIG, default=1)
+
+        parser = argparse.ArgumentParser(fromfile_prefix_chars='@')
+        reg.hook(parser)
+
+        with pytest.raises(argparse.ArgumentError, match='does_not_exist.txt'):
+            reg.parse(parser, ['@does_not_exist.txt'], strict=False)
+
     def test_custom_parser_error_handler_is_not_used_for_internal_parse_errors(self):
         """Internal parser failures should raise ArgumentError instead of using user parser handlers."""
 
